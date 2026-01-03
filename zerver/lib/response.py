@@ -17,62 +17,36 @@ class MutableJsonResponse(HttpResponse):
         status: int,
         exception: Exception | None = None,
     ) -> None:
-        # Mirror the behavior of Django's TemplateResponse and pass an
-        # empty string for the initial content value. Because that will
-        # set _needs_serialization to False, we initialize it to True
-        # after the call to super __init__.
         super().__init__("", content_type=content_type, status=status)
         self._data = data
         self._needs_serialization = True
         self.exception = exception
 
     def get_data(self) -> dict[str, Any]:
-        """Get data for this MutableJsonResponse. Calling this method
-        after the response's content has already been serialized
-        will mean the next time the response's content is accessed
-        it will be reserialized because the caller may have mutated
-        the data."""
         self._needs_serialization = True
         return self._data
 
-    # This always returns bytes, but in Django's HttpResponse the return
-    # value can be bytes, an iterable of bytes or some other object. Any
-    # is used here to encompass all of those return values.
-    # See https://github.com/typeddjango/django-stubs/commit/799b41fe47cfe2e56be33eee8cfbaf89a9853a8e
-    # and https://github.com/python/mypy/issues/3004.
-    @override  # type: ignore[explicit-override] # https://github.com/python/mypy/issues/15900
+    @override  # type: ignore[explicit-override]
     @property
     def content(self) -> Any:
-        """Get content for the response. If the content hasn't been
-        overridden by the property setter, it will be the response data
-        serialized lazily to JSON."""
         if self._needs_serialization:
-            # Because we don't pass a default handler, OPT_PASSTHROUGH_DATETIME
-            # actually causes orjson to raise a TypeError on datetime objects. This
-            # helps us avoid relying on the particular serialization used by orjson.
             self.content = orjson.dumps(
                 self._data,
-                option=orjson.OPT_APPEND_NEWLINE | orjson.OPT_PASSTHROUGH_DATETIME,
+                option=(
+                    orjson.OPT_APPEND_NEWLINE
+                    | orjson.OPT_PASSTHROUGH_DATETIME
+                    | orjson.OPT_SORT_KEYS
+                ),
             )
         return super().content
 
-    # There are two ways this might be called. The first is in the getter when
-    # the response data is being serialized into JSON. The second is when it
-    # is called from some other part of the code. This happens for instance in
-    # the parent class constructor. In this case, the new content overrides the
-    # serialized JSON.
     @content.setter
     def content(self, value: Any) -> None:
-        """Set the content for the response."""
         content: object = super(MutableJsonResponse, type(self)).content
         assert isinstance(content, property)
         content.__set__(self, value)
         self._needs_serialization = False
 
-    # The superclass HttpResponse defines an iterator that doesn't access the content
-    # property, so in order to not break the implementation of the superclass with
-    # our lazy content generation, we override the iterator to access `self.content`
-    # through our getter.
     @override
     def __iter__(self) -> Iterator[bytes]:
         return iter([self.content])
@@ -89,7 +63,8 @@ def json_unauthorized(
 def json_method_not_allowed(methods: list[str]) -> HttpResponseNotAllowed:
     resp = HttpResponseNotAllowed(methods)
     resp.content = orjson.dumps(
-        {"result": "error", "msg": "Method Not Allowed", "allowed_methods": methods}
+        {"result": "error", "msg": "Method Not Allowed", "allowed_methods": methods},
+        option=orjson.OPT_SORT_KEYS,
     )
     return resp
 
@@ -117,16 +92,10 @@ def json_success(request: HttpRequest, data: Mapping[str, Any] = {}) -> MutableJ
 
 
 def json_response_from_error(exception: JsonableError) -> MutableJsonResponse:
-    """
-    This should only be needed in middleware; in app code, just raise.
-
-    When app code raises a JsonableError, the JsonErrorHandler
-    middleware takes care of transforming it into a response by
-    calling this function.
-    """
     response_type = "error"
     if 200 <= exception.http_status_code < 300:
         response_type = "success"
+
     response = json_response(
         response_type,
         msg=exception.msg,
@@ -142,9 +111,4 @@ def json_response_from_error(exception: JsonableError) -> MutableJsonResponse:
 
 
 class AsynchronousResponse(HttpResponse):
-    """
-    This response is just a sentinel to be discarded by Tornado and replaced
-    with a real response later; see zulip_finish.
-    """
-
     status_code = 399
